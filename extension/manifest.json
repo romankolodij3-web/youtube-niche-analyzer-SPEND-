@@ -21,6 +21,6 @@
   "permissions": ["tabs"],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "http://localhost:3000/*"
+   "https://youtube-niche-analyzer-spend.onrender.com/*"
   ]
 }

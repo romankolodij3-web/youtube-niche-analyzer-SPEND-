@@ -147,7 +147,7 @@ analyzeBtn.addEventListener("click", async () => {
       return;
     }
 
-    const backendUrl = `http://localhost:3000/analyze-channel?url=${encodeURIComponent(currentUrl)}`;
+    const backendUrl = `https://youtube-niche-analyzer-spend.onrender.com/analyze-channel?url=${encodeURIComponent(currentUrl)}`;
 
     const response = await fetch(backendUrl);
     const data = await response.json();
