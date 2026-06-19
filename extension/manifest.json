@@ -1,0 +1,26 @@
+
+  {
+  "manifest_version": 3,
+  "name": "YouTube Niche Analyzer SPEND$",
+  "version": "1.0.3",
+  "description": "Analyzes YouTube channel niche potential.",
+  "icons": {
+    "16": "icons/niche16.png",
+    "48": "icons/niche48.png",
+    "128": "icons/niche128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Analyze YouTube Niche",
+    "default_icon": {
+      "16": "icons/niche16.png",
+      "48": "icons/niche48.png",
+      "128": "icons/niche128.png"
+    }
+  },
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://localhost:3000/*"
+  ]
+}
