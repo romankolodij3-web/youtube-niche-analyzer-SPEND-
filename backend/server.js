@@ -10,6 +10,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+const PUBLIC_BACKEND_URL =
+  process.env.PUBLIC_BACKEND_URL || "https://youtube-niche-analyzer-spend.onrender.com";
 
 app.get("/", (req, res) => {
   res.json({
@@ -251,7 +255,6 @@ function estimateRpm(channel, videos) {
     text.includes("різьб") ||
     text.includes("дерев");
 
-  // Shorts оцінюємо окремо, бо RPM у Shorts значно нижчий.
   if (isMostlyShorts) {
     if (isFinance || isTechOrEducation || isMedical) {
       return "$0.05–0.40";
@@ -268,32 +271,26 @@ function estimateRpm(channel, videos) {
     return "$0.03–0.25";
   }
 
-  // Long-form медицина.
   if (isMedical) {
     return "$1–4";
   }
 
-  // Long-form СНД + ігри / стріми / нарізки.
   if (isRussianOrCis && (isGaming || isStreamHighlights)) {
     return "$0.3–1.2";
   }
 
-  // Long-form ігри / стріми.
   if (isGaming || isStreamHighlights) {
     return "$0.8–2.5";
   }
 
-  // Long-form фінанси / бізнес / крипта.
   if (isFinance) {
     return "$4–10";
   }
 
-  // Long-form AI / софт / освіта.
   if (isTechOrEducation) {
     return "$3–7";
   }
 
-  // Загальний СНД / російськомовний контент.
   if (isRussianOrCis) {
     return "$0.5–1.8";
   }
@@ -412,21 +409,9 @@ function calculateDemonetizationRisk(channel, videos) {
     "death"
   ];
 
-  const gamblingWords = [
-    "казино",
-    "ставки",
-    "беттинг",
-    "betting",
-    "casino"
-  ];
+  const gamblingWords = ["казино", "ставки", "беттинг", "betting", "casino"];
 
-  const adultWords = [
-    "18+",
-    "adult",
-    "sex",
-    "інтим",
-    "интим"
-  ];
+  const adultWords = ["18+", "adult", "sex", "інтим", "интим"];
 
   const aiWords = [
     "штучний інтелект",
@@ -734,14 +719,57 @@ function calculateBasicMetrics(channel, videos) {
   };
 }
 
+async function analyzeChannel(channelUrl) {
+  if (!YOUTUBE_API_KEY) {
+    throw new Error("YOUTUBE_API_KEY не знайдено");
+  }
+
+  const handle = getHandleFromUrl(channelUrl);
+  const channelIdFromUrl = getChannelIdFromUrl(channelUrl);
+
+  let channel = null;
+
+  if (handle) {
+    channel = await fetchChannelByHandle(handle);
+  } else if (channelIdFromUrl) {
+    channel = await fetchChannelById(channelIdFromUrl);
+  } else {
+    throw new Error(
+      "Підтримуються тільки URL типу youtube.com/@channel або youtube.com/channel/UC..."
+    );
+  }
+
+  if (!channel) {
+    throw new Error("Канал не знайдено");
+  }
+
+  const uploadsPlaylistId = channel.contentDetails.relatedPlaylists.uploads;
+
+  const videoIds = await fetchLatestVideoIds(uploadsPlaylistId, 30);
+  const videos = await fetchVideosDetails(videoIds);
+
+  const metrics = calculateBasicMetrics(channel, videos);
+
+  return {
+    message: "Канал проаналізовано ✅",
+    channel: {
+      channelId: channel.id,
+      title: channel.snippet.title,
+      description: channel.snippet.description,
+      publishedAt: channel.snippet.publishedAt,
+      country: channel.snippet.country || null,
+      subscribers: Number(channel.statistics.subscriberCount || 0),
+      totalViews: Number(channel.statistics.viewCount || 0),
+      totalVideos: Number(channel.statistics.videoCount || 0),
+      uploadsPlaylistId
+    },
+    metrics,
+    videos
+  };
+}
+
 app.get("/analyze-channel", async (req, res) => {
   try {
-    if (!YOUTUBE_API_KEY) {
-      return res.status(500).json({
-        error: "YOUTUBE_API_KEY не знайдено у змінних середовища"
-      });
-    }
-
     const channelUrl = req.query.url;
 
     if (!channelUrl) {
@@ -751,56 +779,261 @@ app.get("/analyze-channel", async (req, res) => {
       });
     }
 
-    const handle = getHandleFromUrl(channelUrl);
-    const channelIdFromUrl = getChannelIdFromUrl(channelUrl);
-
-    let channel = null;
-
-    if (handle) {
-      channel = await fetchChannelByHandle(handle);
-    } else if (channelIdFromUrl) {
-      channel = await fetchChannelById(channelIdFromUrl);
-    } else {
-      return res.status(400).json({
-        error:
-          "Поки що підтримуються тільки URL типу youtube.com/@channel або youtube.com/channel/UC..."
-      });
-    }
-
-    if (!channel) {
-      return res.status(404).json({
-        error: "Канал не знайдено"
-      });
-    }
-
-    const uploadsPlaylistId = channel.contentDetails.relatedPlaylists.uploads;
-
-    const videoIds = await fetchLatestVideoIds(uploadsPlaylistId, 30);
-    const videos = await fetchVideosDetails(videoIds);
-
-    const metrics = calculateBasicMetrics(channel, videos);
-
-    const result = {
-      message: "Канал проаналізовано ✅",
-      channel: {
-        channelId: channel.id,
-        title: channel.snippet.title,
-        description: channel.snippet.description,
-        publishedAt: channel.snippet.publishedAt,
-        country: channel.snippet.country || null,
-        subscribers: Number(channel.statistics.subscriberCount || 0),
-        totalViews: Number(channel.statistics.viewCount || 0),
-        totalVideos: Number(channel.statistics.videoCount || 0),
-        uploadsPlaylistId
-      },
-      metrics,
-      videos
-    };
+    const result = await analyzeChannel(channelUrl);
 
     res.json(result);
   } catch (error) {
     res.status(500).json({
       error: "Помилка сервера",
+      details: error.message
+    });
+  }
+});
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function formatNumber(number) {
+  return new Intl.NumberFormat("uk-UA").format(Number(number || 0));
+}
+
+function renderList(items) {
+  if (!items || items.length === 0) {
+    return "—";
+  }
+
+  return items.join(", ");
+}
+
+function formatTelegramAnalysis(data) {
+  const scores = data.metrics.scores;
+  const conclusion = data.metrics.conclusion;
+  const raw = data.metrics.raw;
+
+  return `
+📊 <b>Аналіз ніші: ${escapeHtml(data.channel.title)}</b>
+
+<b>Niche Score:</b> ${scores.nicheScore}/10 — ${escapeHtml(scores.verdict)}
+
+<b>Конкуренція:</b> ${scores.competition.value}/10 — ${escapeHtml(scores.competition.label)}
+<b>Актуальність:</b> ${scores.relevance.value}/10 — ${escapeHtml(scores.relevance.label)}
+<b>Попит:</b> ${scores.demand.value}/10 — ${escapeHtml(scores.demand.label)}
+<b>Орієнтовний RPM:</b> ${escapeHtml(scores.estimatedRpm)}
+<b>Evergreen-потенціал:</b> ${scores.evergreen.value}/10 — ${escapeHtml(scores.evergreen.label)}
+<b>Частота публікацій:</b> ${escapeHtml(scores.publishingFrequency.value)}
+<b>Середні перегляди:</b> ${formatNumber(scores.averageViews.value)}
+<b>Views/Subscribers ratio:</b> ${escapeHtml(scores.viewsSubscribersRatio.value)}
+<b>Шанс для нового каналу:</b> ${scores.newChannelChance.value}/10 — ${escapeHtml(scores.newChannelChance.label)}
+<b>Ризик demonetization:</b> ${scores.demonetizationRisk.value}/10 — ${escapeHtml(scores.demonetizationRisk.label)}
+<b>Стабільність ніші:</b> ${scores.nicheStability.value}/10 — ${escapeHtml(scores.nicheStability.label)}
+<b>Потенціал росту:</b> ${scores.growthPotential.value}/10 — ${escapeHtml(scores.growthPotential.label)}
+
+<b>Формат:</b> ${escapeHtml(raw.contentFormat)} (${escapeHtml(raw.shortsRatio)} Shorts)
+<b>Проаналізовано відео:</b> ${data.metrics.analyzedVideos}
+<b>Підписники:</b> ${formatNumber(data.channel.subscribers)}
+
+✅ <b>Сильні сторони:</b>
+${escapeHtml(renderList(conclusion.strengths))}
+
+⚠️ <b>Слабкі сторони:</b>
+${escapeHtml(renderList(conclusion.weaknesses))}
+
+🧠 <b>Висновок:</b>
+${escapeHtml(conclusion.summary)}
+`.trim();
+}
+
+function extractYouTubeChannelUrl(text) {
+  if (!text) return null;
+
+  const urlRegex =
+    /(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/(?:@[^/\s?#]+(?:\/[^\s]*)?|channel\/[^/\s?#]+(?:\/[^\s]*)?)/i;
+
+  const match = text.match(urlRegex);
+
+  if (!match) {
+    return null;
+  }
+
+  let url = match[0];
+
+  if (!url.startsWith("http")) {
+    url = `https://${url}`;
+  }
+
+  return url;
+}
+
+async function sendTelegramMessage(chatId, text) {
+  if (!TELEGRAM_BOT_TOKEN) {
+    throw new Error("TELEGRAM_BOT_TOKEN не знайдено");
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data;
+}
+
+async function handleTelegramUpdate(update) {
+  const message = update.message;
+
+  if (!message || !message.chat) {
+    return;
+  }
+
+  const chatId = message.chat.id;
+  const text = message.text || "";
+
+  if (text === "/start") {
+    await sendTelegramMessage(
+      chatId,
+      `Привіт 👋
+
+Я можу проаналізувати YouTube-нішу по каналу.
+
+Просто скинь мені посилання на YouTube-канал, наприклад:
+
+https://www.youtube.com/@MrBeast
+
+Я поверну:
+• Niche Score
+• конкуренцію
+• попит
+• RPM estimate
+• ризик demonetization
+• середні перегляди
+• частоту публікацій
+• сильні та слабкі сторони`
+    );
+    return;
+  }
+
+  if (text === "/help") {
+    await sendTelegramMessage(
+      chatId,
+      `Скинь посилання на YouTube-канал у форматі:
+
+https://www.youtube.com/@channel
+або
+https://www.youtube.com/channel/UC...
+
+Після цього я зроблю аналіз ніші.`
+    );
+    return;
+  }
+
+  const channelUrl = extractYouTubeChannelUrl(text);
+
+  if (!channelUrl) {
+    await sendTelegramMessage(
+      chatId,
+      `Я не бачу посилання на YouTube-канал.
+
+Скинь мені посилання типу:
+https://www.youtube.com/@MrBeast`
+    );
+    return;
+  }
+
+  await sendTelegramMessage(
+    chatId,
+    "⏳ Аналізую канал... Це може зайняти кілька секунд."
+  );
+
+  try {
+    const result = await analyzeChannel(channelUrl);
+    const formattedMessage = formatTelegramAnalysis(result);
+
+    await sendTelegramMessage(chatId, formattedMessage);
+  } catch (error) {
+    await sendTelegramMessage(
+      chatId,
+      `❌ Не вдалося проаналізувати канал.
+
+Причина:
+${escapeHtml(error.message)}`
+    );
+  }
+}
+
+app.post("/telegram-webhook", (req, res) => {
+  res.sendStatus(200);
+
+  handleTelegramUpdate(req.body).catch((error) => {
+    console.error("Telegram webhook error:", error);
+  });
+});
+
+app.get("/set-telegram-webhook", async (req, res) => {
+  try {
+    if (!TELEGRAM_BOT_TOKEN) {
+      return res.status(500).json({
+        error: "TELEGRAM_BOT_TOKEN не знайдено"
+      });
+    }
+
+    const webhookUrl = `${PUBLIC_BACKEND_URL}/telegram-webhook`;
+
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${encodeURIComponent(
+      webhookUrl
+    )}`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    res.json({
+      message: "Webhook setup result",
+      webhookUrl,
+      telegramResponse: data
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Не вдалося встановити webhook",
+      details: error.message
+    });
+  }
+});
+
+app.get("/telegram-status", async (req, res) => {
+  try {
+    if (!TELEGRAM_BOT_TOKEN) {
+      return res.status(500).json({
+        error: "TELEGRAM_BOT_TOKEN не знайдено"
+      });
+    }
+
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({
+      error: "Не вдалося отримати Telegram status",
       details: error.message
     });
   }
