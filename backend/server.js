@@ -560,24 +560,19 @@ function calculateBasicMetrics(channel, videos) {
     Math.round((relevanceScore + demandScore + stabilityScore) / 3)
   );
 
-  const positiveScores = [
-    relevanceScore,
-    demandScore,
-    evergreenScore,
-    newChannelChanceScore,
-    stabilityScore,
-    growthPotentialScore
-  ];
-
-  const invertedCompetition = 10 - competitionScore;
-  const invertedDemonetization = 10 - demonetizationRiskScore;
+  const lowCompetitionScore = 10 - competitionScore;
+  const lowDemonetizationRiskScore = 10 - demonetizationRiskScore;
 
   const nicheScore = Number(
     (
-      [...positiveScores, invertedCompetition, invertedDemonetization].reduce(
-        (sum, score) => sum + score,
-        0
-      ) / 8
+      demandScore * 0.25 +
+      newChannelChanceScore * 0.2 +
+      relevanceScore * 0.15 +
+      growthPotentialScore * 0.15 +
+      stabilityScore * 0.1 +
+      evergreenScore * 0.05 +
+      lowDemonetizationRiskScore * 0.05 +
+      lowCompetitionScore * 0.05
     ).toFixed(1)
   );
 
