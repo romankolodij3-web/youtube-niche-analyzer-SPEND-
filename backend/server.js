@@ -17,8 +17,16 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PUBLIC_BACKEND_URL =
   process.env.PUBLIC_BACKEND_URL || "https://youtube-niche-analyzer-spend.onrender.com";
 
+const REQUIRED_CHANNEL_USERNAME =
+  process.env.REQUIRED_CHANNEL_USERNAME || "@spend_yt";
+
+const REQUIRED_CHANNEL_URL =
+  process.env.REQUIRED_CHANNEL_URL || "https://t.me/spend_yt";
+
 const BUTTON_NICHE_ANALYSIS = "📊 Аналіз ніші";
 const BUTTON_MONETIZATION_CHECK = "💰 Перевірка на монетизацію";
+
+const CALLBACK_CHECK_SUBSCRIPTION = "check_subscription";
 
 const userModes = new Map();
 
@@ -1027,25 +1035,38 @@ function getMainKeyboard() {
   };
 }
 
-async function sendTelegramMessage(chatId, text, extra = {}) {
+function getSubscriptionKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "📢 Підписатися",
+          url: REQUIRED_CHANNEL_URL
+        }
+      ],
+      [
+        {
+          text: "✅ Перевірити підписку",
+          callback_data: CALLBACK_CHECK_SUBSCRIPTION
+        }
+      ]
+    ]
+  };
+}
+
+async function telegramJsonRequest(method, payload) {
   if (!TELEGRAM_BOT_TOKEN) {
     throw new Error("TELEGRAM_BOT_TOKEN не знайдено");
   }
 
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
 
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      ...extra
-    })
+    body: JSON.stringify(payload)
   });
 
   const data = await response.json();
@@ -1055,6 +1076,69 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
   }
 
   return data;
+}
+
+async function sendTelegramMessage(chatId, text, extra = {}) {
+  return telegramJsonRequest("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...extra
+  });
+}
+
+async function deleteTelegramMessage(chatId, messageId) {
+  return telegramJsonRequest("deleteMessage", {
+    chat_id: chatId,
+    message_id: messageId
+  });
+}
+
+async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
+  return telegramJsonRequest("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: showAlert
+  });
+}
+
+async function isUserSubscribed(userId) {
+  try {
+    const data = await telegramJsonRequest("getChatMember", {
+      chat_id: REQUIRED_CHANNEL_USERNAME,
+      user_id: userId
+    });
+
+    const member = data.result;
+
+    if (!member) {
+      return false;
+    }
+
+    if (member.status === "creator") return true;
+    if (member.status === "administrator") return true;
+    if (member.status === "member") return true;
+
+    if (member.status === "restricted") {
+      return member.is_member === true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Subscription check error:", error);
+    return false;
+  }
+}
+
+async function sendSubscriptionGate(chatId) {
+  await sendTelegramMessage(
+    chatId,
+    `Щоб користуватися ботом, спочатку підпишись на мій Telegram-канал 👇`,
+    {
+      reply_markup: getSubscriptionKeyboard()
+    }
+  );
 }
 
 async function sendTelegramPhoto(chatId, photoPath, caption) {
@@ -1144,7 +1228,55 @@ ${escapeHtml(monetizationCheck.statusText)}
   await sendTelegramPhoto(chatId, photoPath, caption);
 }
 
+async function handleTelegramCallback(callbackQuery) {
+  const callbackData = callbackQuery.data;
+  const userId = callbackQuery.from.id;
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+
+  if (callbackData !== CALLBACK_CHECK_SUBSCRIPTION) {
+    await answerCallbackQuery(callbackQuery.id, "Невідома дія");
+    return;
+  }
+
+  const subscribed = await isUserSubscribed(userId);
+
+  if (!subscribed) {
+    await answerCallbackQuery(
+      callbackQuery.id,
+      "❌ Підписку не знайдено. Спочатку підпишись на канал.",
+      true
+    );
+    return;
+  }
+
+  await answerCallbackQuery(callbackQuery.id, "✅ Підписка підтверджена");
+
+  if (chatId && messageId) {
+    try {
+      await deleteTelegramMessage(chatId, messageId);
+    } catch (error) {
+      console.error("Delete subscription message error:", error);
+    }
+  }
+
+  userModes.delete(chatId);
+
+  await sendTelegramMessage(
+    chatId,
+    "✅ Підписка підтверджена. Приємного користування!",
+    {
+      reply_markup: getMainKeyboard()
+    }
+  );
+}
+
 async function handleTelegramUpdate(update) {
+  if (update.callback_query) {
+    await handleTelegramCallback(update.callback_query);
+    return;
+  }
+
   const message = update.message;
 
   if (!message || !message.chat) {
@@ -1152,11 +1284,28 @@ async function handleTelegramUpdate(update) {
   }
 
   const chatId = message.chat.id;
+  const userId = message.from?.id;
   const text = message.text || "";
 
   if (text === "/start" || text === "/help") {
     userModes.delete(chatId);
+
+    const subscribed = await isUserSubscribed(userId);
+
+    if (!subscribed) {
+      await sendSubscriptionGate(chatId);
+      return;
+    }
+
     await sendStartMenu(chatId);
+    return;
+  }
+
+  const subscribed = await isUserSubscribed(userId);
+
+  if (!subscribed) {
+    userModes.delete(chatId);
+    await sendSubscriptionGate(chatId);
     return;
   }
 
