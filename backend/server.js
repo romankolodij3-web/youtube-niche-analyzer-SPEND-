@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 
@@ -14,6 +16,17 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 const PUBLIC_BACKEND_URL =
   process.env.PUBLIC_BACKEND_URL || "https://youtube-niche-analyzer-spend.onrender.com";
+
+const BUTTON_NICHE_ANALYSIS = "📊 Аналіз ніші";
+const BUTTON_MONETIZATION_CHECK = "💰 Перевірка на монетизацію";
+
+const userModes = new Map();
+
+const MONETIZATION_IMAGES = {
+  yes: path.join(__dirname, "assets", "money-yes.jpg"),
+  fifty: path.join(__dirname, "assets", "money-fifty.jpg"),
+  no: path.join(__dirname, "assets", "money-no.jpg")
+};
 
 app.get("/", (req, res) => {
   res.json({
@@ -455,6 +468,81 @@ function calculateDemonetizationRisk(channel, videos) {
   };
 }
 
+function calculateReusedContentRisk(channel, videos) {
+  const text = `${channel.snippet.title} ${channel.snippet.description} ${videos
+    .map((video) => video.title)
+    .join(" ")}`.toLowerCase();
+
+  const formatStats = getContentFormatStats(videos);
+
+  let risk = 1;
+
+  const reusedWords = [
+    "нарез",
+    "наріз",
+    "лучшее",
+    "лучшие моменты",
+    "best moments",
+    "moments",
+    "compilation",
+    "компиляция",
+    "компіляція",
+    "clips",
+    "клипы",
+    "кліпи",
+    "tiktok",
+    "tik tok",
+    "реакция",
+    "reaction",
+    "стрим",
+    "stream highlights",
+    "funny moments",
+    "подборка",
+    "підбірка",
+    "озвучка",
+    "озвучено",
+    "перезалив",
+    "перезаливы"
+  ];
+
+  let matches = 0;
+
+  reusedWords.forEach((word) => {
+    if (text.includes(word)) {
+      matches += 1;
+    }
+  });
+
+  risk += matches;
+
+  if (formatStats.contentFormat === "Shorts") {
+    risk += 2;
+  }
+
+  if (formatStats.contentFormat === "Mixed") {
+    risk += 1;
+  }
+
+  const titles = videos.map((video) => video.title.toLowerCase());
+  const similarTitleCount = titles.filter((title) => {
+    return (
+      title.includes("#shorts") ||
+      title.includes("part") ||
+      title.includes("часть") ||
+      title.includes("частина") ||
+      title.includes("момент")
+    );
+  }).length;
+
+  if (similarTitleCount >= 10) {
+    risk += 2;
+  } else if (similarTitleCount >= 5) {
+    risk += 1;
+  }
+
+  return clampScore(risk);
+}
+
 function calculateBasicMetrics(channel, videos) {
   const subscribers = Number(channel.statistics.subscriberCount || 0);
 
@@ -714,6 +802,69 @@ function calculateBasicMetrics(channel, videos) {
   };
 }
 
+function calculateMonetizationCheck(channel, videos, metrics) {
+  const subscribers = Number(channel.statistics.subscriberCount || 0);
+  const totalVideos = Number(channel.statistics.videoCount || 0);
+  const averageViews = metrics.raw.averageViews;
+  const viewsSubscribersRatio = metrics.raw.viewsSubscribersRatio;
+  const contentFormat = metrics.raw.contentFormat;
+  const demonetizationRiskScore = metrics.scores.demonetizationRisk.value;
+  const reusedContentRiskScore = calculateReusedContentRisk(channel, videos);
+
+  const newestVideoDate =
+    videos.length > 0 ? new Date(videos[0].publishedAt) : null;
+
+  const daysSinceNewestVideo = newestVideoDate
+    ? (Date.now() - newestVideoDate.getTime()) / (1000 * 60 * 60 * 24)
+    : 9999;
+
+  let score = 0;
+
+  if (subscribers >= 1000) score += 2;
+  if (subscribers >= 10000) score += 1;
+  if (subscribers >= 100000) score += 1;
+
+  if (averageViews >= 5000) score += 1;
+  if (averageViews >= 50000) score += 1;
+  if (averageViews >= 200000) score += 1;
+
+  if (viewsSubscribersRatio >= 5) score += 1;
+  if (viewsSubscribersRatio >= 20) score += 1;
+
+  if (totalVideos >= 20) score += 1;
+
+  if (daysSinceNewestVideo <= 180) score += 1;
+
+  if (contentFormat === "Long-form") score += 1;
+  if (contentFormat === "Shorts") score -= 1;
+
+  if (demonetizationRiskScore >= 6) score -= 2;
+  else if (demonetizationRiskScore >= 4) score -= 1;
+
+  if (reusedContentRiskScore >= 8) score -= 3;
+  else if (reusedContentRiskScore >= 6) score -= 2;
+  else if (reusedContentRiskScore >= 4) score -= 1;
+
+  score = clampScore(score);
+
+  let statusKey = "fifty";
+  let statusText = "⚖️ Монетизація — 50 на 50";
+
+  if (score >= 7) {
+    statusKey = "yes";
+    statusText = "✅ Монетизація — найімовірніше присутня";
+  } else if (score <= 4) {
+    statusKey = "no";
+    statusText = "❌ Монетизація — найімовірніше відсутня";
+  }
+
+  return {
+    score,
+    statusKey,
+    statusText
+  };
+}
+
 async function analyzeChannel(channelUrl) {
   if (!YOUTUBE_API_KEY) {
     throw new Error("YOUTUBE_API_KEY не знайдено");
@@ -759,7 +910,8 @@ async function analyzeChannel(channelUrl) {
       uploadsPlaylistId
     },
     metrics,
-    videos
+    videos,
+    originalChannel: channel
   };
 }
 
@@ -776,7 +928,12 @@ app.get("/analyze-channel", async (req, res) => {
 
     const result = await analyzeChannel(channelUrl);
 
-    res.json(result);
+    res.json({
+      message: result.message,
+      channel: result.channel,
+      metrics: result.metrics,
+      videos: result.videos
+    });
   } catch (error) {
     res.status(500).json({
       error: "Помилка сервера",
@@ -863,7 +1020,14 @@ function extractYouTubeChannelUrl(text) {
   return url;
 }
 
-async function sendTelegramMessage(chatId, text) {
+function getMainKeyboard() {
+  return {
+    keyboard: [[BUTTON_NICHE_ANALYSIS], [BUTTON_MONETIZATION_CHECK]],
+    resize_keyboard: true
+  };
+}
+
+async function sendTelegramMessage(chatId, text, extra = {}) {
   if (!TELEGRAM_BOT_TOKEN) {
     throw new Error("TELEGRAM_BOT_TOKEN не знайдено");
   }
@@ -879,7 +1043,8 @@ async function sendTelegramMessage(chatId, text) {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-      disable_web_page_preview: true
+      disable_web_page_preview: true,
+      ...extra
     })
   });
 
@@ -892,6 +1057,93 @@ async function sendTelegramMessage(chatId, text) {
   return data;
 }
 
+async function sendTelegramPhoto(chatId, photoPath, caption) {
+  if (!TELEGRAM_BOT_TOKEN) {
+    throw new Error("TELEGRAM_BOT_TOKEN не знайдено");
+  }
+
+  if (!fs.existsSync(photoPath)) {
+    await sendTelegramMessage(chatId, caption);
+    return;
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
+
+  const imageBuffer = fs.readFileSync(photoPath);
+  const imageBlob = new Blob([imageBuffer], { type: "image/jpeg" });
+
+  const formData = new FormData();
+
+  formData.append("chat_id", String(chatId));
+  formData.append("photo", imageBlob, path.basename(photoPath));
+  formData.append("caption", caption);
+  formData.append("parse_mode", "HTML");
+
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data;
+}
+
+async function sendStartMenu(chatId) {
+  await sendTelegramMessage(
+    chatId,
+    `Привіт 👋
+
+Обери, що хочеш зробити:`,
+    {
+      reply_markup: getMainKeyboard()
+    }
+  );
+}
+
+async function processNicheAnalysis(chatId, channelUrl) {
+  await sendTelegramMessage(
+    chatId,
+    "⏳ Аналізую нішу... Це може зайняти кілька секунд."
+  );
+
+  const result = await analyzeChannel(channelUrl);
+  const formattedMessage = formatTelegramAnalysis(result);
+
+  await sendTelegramMessage(chatId, formattedMessage, {
+    reply_markup: getMainKeyboard()
+  });
+}
+
+async function processMonetizationCheck(chatId, channelUrl) {
+  await sendTelegramMessage(
+    chatId,
+    "⏳ Перевіряю монетизацію... Це може зайняти кілька секунд."
+  );
+
+  const result = await analyzeChannel(channelUrl);
+
+  const monetizationCheck = calculateMonetizationCheck(
+    result.originalChannel,
+    result.videos,
+    result.metrics
+  );
+
+  const photoPath = MONETIZATION_IMAGES[monetizationCheck.statusKey];
+
+  const caption = `
+💰 <b>${escapeHtml(result.channel.title)}</b>
+
+${escapeHtml(monetizationCheck.statusText)}
+`.trim();
+
+  await sendTelegramPhoto(chatId, photoPath, caption);
+}
+
 async function handleTelegramUpdate(update) {
   const message = update.message;
 
@@ -902,41 +1154,43 @@ async function handleTelegramUpdate(update) {
   const chatId = message.chat.id;
   const text = message.text || "";
 
-  if (text === "/start") {
-    await sendTelegramMessage(
-      chatId,
-      `Привіт 👋
-
-Я можу проаналізувати YouTube-нішу по каналу.
-
-Просто скинь мені посилання на YouTube-канал, наприклад:
-
-https://www.youtube.com/@MrBeast
-
-Я поверну:
-• Niche Score
-• конкуренцію
-• попит
-• RPM estimate
-• ризик demonetization
-• середні перегляди
-• частоту публікацій
-• сильні та слабкі сторони`
-    );
+  if (text === "/start" || text === "/help") {
+    userModes.delete(chatId);
+    await sendStartMenu(chatId);
     return;
   }
 
-  if (text === "/help") {
+  if (text === BUTTON_NICHE_ANALYSIS) {
+    userModes.set(chatId, "niche");
+
     await sendTelegramMessage(
       chatId,
-      `Скинь посилання на YouTube-канал у форматі:
+      `Скинь посилання на YouTube-канал для аналізу ніші.
 
-https://www.youtube.com/@channel
-або
-https://www.youtube.com/channel/UC...
-
-Після цього я зроблю аналіз ніші.`
+Наприклад:
+https://www.youtube.com/@MrBeast`,
+      {
+        reply_markup: getMainKeyboard()
+      }
     );
+
+    return;
+  }
+
+  if (text === BUTTON_MONETIZATION_CHECK) {
+    userModes.set(chatId, "monetization");
+
+    await sendTelegramMessage(
+      chatId,
+      `Скинь посилання на YouTube-канал для перевірки монетизації.
+
+Наприклад:
+https://www.youtube.com/@MrBeast`,
+      {
+        reply_markup: getMainKeyboard()
+      }
+    );
+
     return;
   }
 
@@ -945,31 +1199,51 @@ https://www.youtube.com/channel/UC...
   if (!channelUrl) {
     await sendTelegramMessage(
       chatId,
-      `Я не бачу посилання на YouTube-канал.
+      `Спочатку обери кнопку:
 
-Скинь мені посилання типу:
-https://www.youtube.com/@MrBeast`
+${BUTTON_NICHE_ANALYSIS}
+або
+${BUTTON_MONETIZATION_CHECK}`,
+      {
+        reply_markup: getMainKeyboard()
+      }
     );
     return;
   }
 
-  await sendTelegramMessage(
-    chatId,
-    "⏳ Аналізую канал... Це може зайняти кілька секунд."
-  );
+  const mode = userModes.get(chatId);
+
+  if (!mode) {
+    await sendTelegramMessage(
+      chatId,
+      `Обери, що зробити з цим каналом:`,
+      {
+        reply_markup: getMainKeyboard()
+      }
+    );
+    return;
+  }
 
   try {
-    const result = await analyzeChannel(channelUrl);
-    const formattedMessage = formatTelegramAnalysis(result);
+    if (mode === "niche") {
+      await processNicheAnalysis(chatId, channelUrl);
+      return;
+    }
 
-    await sendTelegramMessage(chatId, formattedMessage);
+    if (mode === "monetization") {
+      await processMonetizationCheck(chatId, channelUrl);
+      return;
+    }
   } catch (error) {
     await sendTelegramMessage(
       chatId,
-      `❌ Не вдалося проаналізувати канал.
+      `❌ Сталася помилка.
 
 Причина:
-${escapeHtml(error.message)}`
+${escapeHtml(error.message)}`,
+      {
+        reply_markup: getMainKeyboard()
+      }
     );
   }
 }
