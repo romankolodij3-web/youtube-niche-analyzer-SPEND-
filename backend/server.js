@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
@@ -14,8 +15,22 @@ const PORT = process.env.PORT || 3000;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
+
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: {
+          persistSession: false
+        }
+      })
+    : null;
+
 const PUBLIC_BACKEND_URL =
-  process.env.PUBLIC_BACKEND_URL || "https://youtube-niche-analyzer-spend.onrender.com";
+  process.env.PUBLIC_BACKEND_URL ||
+  "https://youtube-niche-analyzer-spend.onrender.com";
 
 const REQUIRED_CHANNEL_USERNAME =
   process.env.REQUIRED_CHANNEL_USERNAME || "@spend_yt";
@@ -41,6 +56,141 @@ app.get("/", (req, res) => {
     message: "Backend працює ✅"
   });
 });
+
+async function trackUser(user, isSubscribed = null) {
+  if (!supabase || !user || !user.id) {
+    return;
+  }
+
+  const payload = {
+    telegram_user_id: user.id,
+    username: user.username || null,
+    first_name: user.first_name || null,
+    last_name: user.last_name || null,
+    last_seen: new Date().toISOString()
+  };
+
+  if (typeof isSubscribed === "boolean") {
+    payload.is_subscribed = isSubscribed;
+  }
+
+  const { error } = await supabase.from("bot_users").upsert(payload, {
+    onConflict: "telegram_user_id"
+  });
+
+  if (error) {
+    console.error("Supabase trackUser error:", error);
+  }
+}
+
+async function logBotEvent(userId, eventType, channelUrl = null) {
+  if (!supabase || !userId) {
+    return;
+  }
+
+  const { error } = await supabase.from("bot_events").insert({
+    telegram_user_id: userId,
+    event_type: eventType,
+    channel_url: channelUrl
+  });
+
+  if (error) {
+    console.error("Supabase logBotEvent error:", error);
+  }
+}
+
+async function incrementUserCounter(userId, counterName) {
+  if (!supabase || !userId) {
+    return;
+  }
+
+  const { data, error: selectError } = await supabase
+    .from("bot_users")
+    .select(counterName)
+    .eq("telegram_user_id", userId)
+    .single();
+
+  if (selectError) {
+    console.error("Supabase counter select error:", selectError);
+    return;
+  }
+
+  const currentValue = Number(data?.[counterName] || 0);
+
+  const { error: updateError } = await supabase
+    .from("bot_users")
+    .update({
+      [counterName]: currentValue + 1,
+      last_seen: new Date().toISOString()
+    })
+    .eq("telegram_user_id", userId);
+
+  if (updateError) {
+    console.error("Supabase counter update error:", updateError);
+  }
+}
+
+async function getBotStats() {
+  if (!supabase) {
+    throw new Error("Supabase не підключений");
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = today.toISOString();
+
+  const { count: totalUsers } = await supabase
+    .from("bot_users")
+    .select("*", { count: "exact", head: true });
+
+  const { count: newToday } = await supabase
+    .from("bot_users")
+    .select("*", { count: "exact", head: true })
+    .gte("first_seen", todayIso);
+
+  const { count: activeToday } = await supabase
+    .from("bot_users")
+    .select("*", { count: "exact", head: true })
+    .gte("last_seen", todayIso);
+
+  const { count: subscribedUsers } = await supabase
+    .from("bot_users")
+    .select("*", { count: "exact", head: true })
+    .eq("is_subscribed", true);
+
+  const { count: nicheChecks } = await supabase
+    .from("bot_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", "niche_check");
+
+  const { count: monetizationChecks } = await supabase
+    .from("bot_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", "monetization_check");
+
+  const { count: nicheChecksToday } = await supabase
+    .from("bot_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", "niche_check")
+    .gte("created_at", todayIso);
+
+  const { count: monetizationChecksToday } = await supabase
+    .from("bot_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", "monetization_check")
+    .gte("created_at", todayIso);
+
+  return {
+    totalUsers: totalUsers || 0,
+    newToday: newToday || 0,
+    activeToday: activeToday || 0,
+    subscribedUsers: subscribedUsers || 0,
+    nicheChecks: nicheChecks || 0,
+    monetizationChecks: monetizationChecks || 0,
+    nicheChecksToday: nicheChecksToday || 0,
+    monetizationChecksToday: monetizationChecksToday || 0
+  };
+}
 
 function getHandleFromUrl(channelUrl) {
   const match = channelUrl.match(/youtube\.com\/@([^/?#]+)/);
@@ -431,7 +581,6 @@ function calculateDemonetizationRisk(channel, videos) {
   ];
 
   const gamblingWords = ["казино", "ставки", "беттинг", "betting", "casino"];
-
   const adultWords = ["18+", "adult", "sex", "інтим", "интим"];
 
   const aiWords = [
@@ -1189,7 +1338,27 @@ async function sendStartMenu(chatId) {
   );
 }
 
-async function processNicheAnalysis(chatId, channelUrl) {
+async function sendStats(chatId) {
+  const stats = await getBotStats();
+
+  await sendTelegramMessage(
+    chatId,
+    `📊 <b>Статистика бота</b>
+
+👥 Унікальних користувачів: <b>${stats.totalUsers}</b>
+🆕 Нових сьогодні: <b>${stats.newToday}</b>
+🔥 Активних сьогодні: <b>${stats.activeToday}</b>
+✅ Підписаних користувачів: <b>${stats.subscribedUsers}</b>
+
+📊 Аналізів ніші всього: <b>${stats.nicheChecks}</b>
+💰 Перевірок монетизації всього: <b>${stats.monetizationChecks}</b>
+
+📊 Аналізів ніші сьогодні: <b>${stats.nicheChecksToday}</b>
+💰 Перевірок монетизації сьогодні: <b>${stats.monetizationChecksToday}</b>`
+  );
+}
+
+async function processNicheAnalysis(chatId, userId, channelUrl) {
   await sendTelegramMessage(
     chatId,
     "⏳ Аналізую нішу... Це може зайняти кілька секунд."
@@ -1198,12 +1367,15 @@ async function processNicheAnalysis(chatId, channelUrl) {
   const result = await analyzeChannel(channelUrl);
   const formattedMessage = formatTelegramAnalysis(result);
 
+  await incrementUserCounter(userId, "niche_checks");
+  await logBotEvent(userId, "niche_check", channelUrl);
+
   await sendTelegramMessage(chatId, formattedMessage, {
     reply_markup: getMainKeyboard()
   });
 }
 
-async function processMonetizationCheck(chatId, channelUrl) {
+async function processMonetizationCheck(chatId, userId, channelUrl) {
   await sendTelegramMessage(
     chatId,
     "⏳ Перевіряю монетизацію... Це може зайняти кілька секунд."
@@ -1225,6 +1397,9 @@ async function processMonetizationCheck(chatId, channelUrl) {
 ${escapeHtml(monetizationCheck.statusText)}
 `.trim();
 
+  await incrementUserCounter(userId, "monetization_checks");
+  await logBotEvent(userId, "monetization_check", channelUrl);
+
   await sendTelegramPhoto(chatId, photoPath, caption);
 }
 
@@ -1234,12 +1409,16 @@ async function handleTelegramCallback(callbackQuery) {
   const chatId = callbackQuery.message?.chat?.id;
   const messageId = callbackQuery.message?.message_id;
 
+  await trackUser(callbackQuery.from);
+
   if (callbackData !== CALLBACK_CHECK_SUBSCRIPTION) {
     await answerCallbackQuery(callbackQuery.id, "Невідома дія");
     return;
   }
 
   const subscribed = await isUserSubscribed(userId);
+
+  await trackUser(callbackQuery.from, subscribed);
 
   if (!subscribed) {
     await answerCallbackQuery(
@@ -1287,10 +1466,23 @@ async function handleTelegramUpdate(update) {
   const userId = message.from?.id;
   const text = message.text || "";
 
+  await trackUser(message.from);
+
+  if (text === "/stats") {
+    if (String(userId) !== String(ADMIN_TELEGRAM_ID)) {
+      await sendTelegramMessage(chatId, "⛔ У тебе немає доступу до статистики.");
+      return;
+    }
+
+    await sendStats(chatId);
+    return;
+  }
+
   if (text === "/start" || text === "/help") {
     userModes.delete(chatId);
 
     const subscribed = await isUserSubscribed(userId);
+    await trackUser(message.from, subscribed);
 
     if (!subscribed) {
       await sendSubscriptionGate(chatId);
@@ -1302,6 +1494,7 @@ async function handleTelegramUpdate(update) {
   }
 
   const subscribed = await isUserSubscribed(userId);
+  await trackUser(message.from, subscribed);
 
   if (!subscribed) {
     userModes.delete(chatId);
@@ -1375,12 +1568,12 @@ ${BUTTON_MONETIZATION_CHECK}`,
 
   try {
     if (mode === "niche") {
-      await processNicheAnalysis(chatId, channelUrl);
+      await processNicheAnalysis(chatId, userId, channelUrl);
       return;
     }
 
     if (mode === "monetization") {
-      await processMonetizationCheck(chatId, channelUrl);
+      await processMonetizationCheck(chatId, userId, channelUrl);
       return;
     }
   } catch (error) {
